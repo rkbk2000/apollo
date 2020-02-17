@@ -19,7 +19,6 @@
 #include <omp.h>
 
 #include <algorithm>
-#include <limits>
 #include <utility>
 
 #include "cyber/common/file.h"
@@ -30,28 +29,27 @@
 #include "modules/prediction/common/prediction_gflags.h"
 #include "modules/prediction/common/prediction_system_gflags.h"
 #include "modules/prediction/container/container_manager.h"
-#include "modules/prediction/container/obstacles/obstacles_container.h"
 
 namespace apollo {
 namespace prediction {
 
 using apollo::common::TrajectoryPoint;
-using apollo::common::adapter::AdapterConfig;
 using apollo::common::math::Vec2d;
-using apollo::cyber::common::GetProtoFromFile;
 
 LaneScanningEvaluator::LaneScanningEvaluator() : device_(torch::kCPU) {
   evaluator_type_ = ObstacleConf::LANE_SCANNING_EVALUATOR;
   LoadModel();
 }
 
-bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr) {
+bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr,
+                                     ObstaclesContainer* obstacles_container) {
   std::vector<Obstacle*> dummy_dynamic_env;
-  Evaluate(obstacle_ptr, dummy_dynamic_env);
+  Evaluate(obstacle_ptr, obstacles_container, dummy_dynamic_env);
   return true;
 }
 
 bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr,
+                                     ObstaclesContainer* obstacles_container,
                                      std::vector<Obstacle*> dynamic_env) {
   // Sanity checks.
   omp_set_num_threads(1);
@@ -74,7 +72,7 @@ bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr,
   LaneGraph* lane_graph_ptr =
       latest_feature_ptr->mutable_lane()->mutable_lane_graph_ordered();
   CHECK_NOTNULL(lane_graph_ptr);
-  if (lane_graph_ptr->lane_sequence_size() == 0) {
+  if (lane_graph_ptr->lane_sequence().empty()) {
     AERROR << "Obstacle [" << id << "] has no lane sequences.";
     return false;
   }
@@ -97,7 +95,8 @@ bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr,
       learning_data_tag = "vehicle_junction";
     }
     FeatureOutput::InsertDataForLearning(*latest_feature_ptr, feature_values,
-        string_feature_values, learning_data_tag, nullptr);
+                                         string_feature_values,
+                                         learning_data_tag, nullptr);
     ADEBUG << "Save extracted features for learning locally.";
     return true;
   }
@@ -111,8 +110,7 @@ bool LaneScanningEvaluator::Evaluate(Obstacle* obstacle_ptr,
     torch_input[0][i] = static_cast<float>(feature_values[i]);
   }
   torch_inputs.push_back(std::move(torch_input));
-  ModelInference(torch_inputs, torch_lane_scanning_model_ptr_,
-                 latest_feature_ptr);
+  ModelInference(torch_inputs, torch_lane_scanning_model_, latest_feature_ptr);
   return true;
 }
 
@@ -195,8 +193,8 @@ bool LaneScanningEvaluator::ExtractObstacleFeatures(
       FLAGS_cruise_historical_frame_length, 0.0);
   std::vector<std::vector<std::pair<double, double>>> polygon_points_history(
       FLAGS_cruise_historical_frame_length,
-      std::vector<std::pair<double, double>>(
-          max_num_poly_pt, std::make_pair(0.0, 0.0)));
+      std::vector<std::pair<double, double>>(max_num_poly_pt,
+                                             std::make_pair(0.0, 0.0)));
 
   // Get obstacle's current position to set up the relative coord. system.
   const Feature& obs_curr_feature = obstacle_ptr->latest_feature();
@@ -222,9 +220,8 @@ bool LaneScanningEvaluator::ExtractObstacleFeatures(
     }
     // Extract normalized position info.
     if (feature.has_position()) {
-      pos_history[i] = WorldCoordToObjCoord(
-          std::make_pair(feature.position().x(), feature.position().y()),
-          obs_curr_pos, obs_curr_heading);
+      pos_history[i] =
+          std::make_pair(feature.position().x(), feature.position().y());
     } else {
       has_history[i] = 0.0;
     }
@@ -255,8 +252,7 @@ bool LaneScanningEvaluator::ExtractObstacleFeatures(
     }
     // Extract velocity heading info.
     if (feature.has_velocity_heading()) {
-      vel_heading_history[i] =
-          WorldAngleToObjAngle(feature.velocity_heading(), obs_curr_heading);
+      vel_heading_history[i] = feature.velocity_heading();
       if (i != 0) {
         vel_heading_changing_rate_history[i] =
             (vel_heading_history[i] - vel_heading_history[i - 1]) /
@@ -444,21 +440,19 @@ bool LaneScanningEvaluator::ExtractStaticEnvFeatures(
 }
 
 void LaneScanningEvaluator::LoadModel() {
-  // TODO(all) uncomment the following when cuda issue is resolved
-  // if (torch::cuda::is_available()) {
-  //   ADEBUG << "CUDA is available";
-  //   device_ = torch::Device(torch::kCUDA);
-  // }
+  if (FLAGS_use_cuda && torch::cuda::is_available()) {
+    ADEBUG << "CUDA is available";
+    device_ = torch::Device(torch::kCUDA);
+  }
   torch::set_num_threads(1);
-  torch_lane_scanning_model_ptr_ =
+  torch_lane_scanning_model_ =
       torch::jit::load(FLAGS_torch_vehicle_lane_scanning_file, device_);
 }
 
 void LaneScanningEvaluator::ModelInference(
     const std::vector<torch::jit::IValue>& torch_inputs,
-    std::shared_ptr<torch::jit::script::Module> torch_model_ptr,
-    Feature* feature_ptr) {
-  auto torch_output_tensor = torch_model_ptr->forward(torch_inputs).toTensor();
+    torch::jit::script::Module torch_model, Feature* feature_ptr) {
+  auto torch_output_tensor = torch_model.forward(torch_inputs).toTensor();
   auto torch_output = torch_output_tensor.accessor<float, 3>();
   for (size_t i = 0; i < SHORT_TERM_TRAJECTORY_SIZE; ++i) {
     TrajectoryPoint point;

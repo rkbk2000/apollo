@@ -1419,7 +1419,9 @@ void DistanceApproachIPOPTInterface::get_optimization_results(
   *dual_l_result = dual_l_result_;
   *dual_n_result = dual_n_result_;
 
-  if (!distance_approach_config_.enable_initial_final_check()) return;
+  if (!distance_approach_config_.enable_initial_final_check()) {
+    return;
+  }
   CHECK_EQ(state_result_.cols(), xWS_.cols());
   CHECK_EQ(state_result_.rows(), xWS_.rows());
   double state_diff_max = 0.0;
@@ -1874,7 +1876,7 @@ bool DistanceApproachIPOPTInterface::check_g(int n, const double* x, int m,
 
   for (int idx = 0; idx < m; ++idx) {
     if (g[idx] > g_u_tmp[idx] + delta_v || g[idx] < g_l_tmp[idx] - delta_v) {
-      AINFO << "constratins idx unfeasible: " << idx << ", g: " << g[idx]
+      AINFO << "constrains idx unfeasible: " << idx << ", g: " << g[idx]
             << ", lower: " << g_l_tmp[idx] << ", upper: " << g_u_tmp[idx];
     }
   }

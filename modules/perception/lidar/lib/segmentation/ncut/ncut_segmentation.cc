@@ -15,9 +15,11 @@
  *****************************************************************************/
 
 #include "modules/perception/lidar/lib/segmentation/ncut/ncut_segmentation.h"
+
 #include <omp.h>
 #include <algorithm>
 #include <map>
+
 #include "cyber/common/file.h"
 #include "cyber/common/log.h"
 #include "modules/perception/lib/config_manager/config_manager.h"
@@ -620,8 +622,8 @@ void NCutSegmentation::VisualizeComponents(
   for (size_t i = 0; i < component_points.size(); ++i) {
     char text[256];
     char text_id[256];
-    snprintf(text, sizeof(text), "%lu", i);
-    snprintf(text_id, sizeof(text_id), "c%lu", i);
+    snprintf(text, sizeof(text), "%zu", i);
+    snprintf(text_id, sizeof(text_id), "c%zu", i);
     _viewer->addText3D(text, centers[i], 0.3, 1.0, 1.0, 1.0, text_id, 0);
   }
   _viewer->spin();

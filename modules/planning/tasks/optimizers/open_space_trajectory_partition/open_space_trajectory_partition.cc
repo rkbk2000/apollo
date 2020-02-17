@@ -17,14 +17,11 @@
 /**
  * @file
  **/
-#include <limits>
-#include <queue>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "modules/planning/tasks/optimizers/open_space_trajectory_partition/open_space_trajectory_partition.h"
 
+#include <queue>
+
+#include "absl/strings/str_cat.h"
 #include "modules/common/math/polygon2d.h"
 #include "modules/common/status/status.h"
 #include "modules/planning/common/planning_context.h"
@@ -101,6 +98,23 @@ Status OpenSpaceTrajectoryPartition::Process() {
 
   PartitionTrajectory(*interpolated_trajectory_result_ptr,
                       partitioned_trajectories);
+
+  const auto& open_space_status =
+      PlanningContext::Instance()->planning_status().open_space();
+  if (!open_space_status.position_init() &&
+      frame_->open_space_info().open_space_provider_success()) {
+    auto* open_space_status = PlanningContext::Instance()
+                                  ->mutable_planning_status()
+                                  ->mutable_open_space();
+    open_space_status->set_position_init(true);
+    auto* chosen_partitioned_trajectory =
+        open_space_info_ptr->mutable_chosen_partitioned_trajectory();
+    auto* mutable_trajectory =
+        open_space_info_ptr->mutable_stitched_trajectory_result();
+    AdjustRelativeTimeAndS(open_space_info.partitioned_trajectories(), 0, 0,
+                           mutable_trajectory, chosen_partitioned_trajectory);
+    return Status::OK();
+  }
 
   // Choose the one to follow based on the closest partitioned trajectory
   size_t trajectories_size = partitioned_trajectories->size();
@@ -308,46 +322,46 @@ bool OpenSpaceTrajectoryPartition::EncodeTrajectory(
     AERROR << "Fail to encode trajectory because it is empty";
     return false;
   }
-  constexpr double encoding_origin_x = 58700.0;
-  constexpr double encoding_origin_y = 4141000.0;
+  static constexpr double encoding_origin_x = 58700.0;
+  static constexpr double encoding_origin_y = 4141000.0;
   const auto& init_path_point = trajectory.front().path_point();
   const auto& last_path_point = trajectory.back().path_point();
 
-  const std::string init_point_x_encoding = std::to_string(
-      static_cast<int>((init_path_point.x() - encoding_origin_x) * 1000.0));
-  const std::string init_point_y_encoding = std::to_string(
-      static_cast<int>((init_path_point.y() - encoding_origin_y) * 1000.0));
-  const std::string init_point_heading_encoding =
-      std::to_string(static_cast<int>(init_path_point.theta() * 10000.0));
-  const std::string last_point_x_encoding = std::to_string(
-      static_cast<int>((last_path_point.x() - encoding_origin_x) * 1000.0));
-  const std::string last_point_y_encoding = std::to_string(
-      static_cast<int>((last_path_point.y() - encoding_origin_y) * 1000.0));
-  const std::string last_point_heading_encoding =
-      std::to_string(static_cast<int>(last_path_point.theta() * 10000.0));
+  const int init_point_x =
+      static_cast<int>((init_path_point.x() - encoding_origin_x) * 1000.0);
+  const int init_point_y =
+      static_cast<int>((init_path_point.y() - encoding_origin_y) * 1000.0);
+  const int init_point_heading =
+      static_cast<int>(init_path_point.theta() * 10000.0);
+  const int last_point_x =
+      static_cast<int>((last_path_point.x() - encoding_origin_x) * 1000.0);
+  const int last_point_y =
+      static_cast<int>((last_path_point.y() - encoding_origin_y) * 1000.0);
+  const int last_point_heading =
+      static_cast<int>(last_path_point.theta() * 10000.0);
 
-  const std::string init_point_encoding = init_point_x_encoding + "_" +
-                                          init_point_y_encoding + "_" +
-                                          init_point_heading_encoding;
-  const std::string last_point_encoding = last_point_x_encoding + "_" +
-                                          last_point_y_encoding + "_" +
-                                          last_point_heading_encoding;
-
-  *encoding = init_point_encoding + "/" + last_point_encoding;
+  *encoding = absl::StrCat(
+      // init point
+      init_point_x, "_", init_point_y, "_", init_point_heading, "/",
+      // last point
+      last_point_x, "_", last_point_y, "_", last_point_heading);
   return true;
 }
 
 bool OpenSpaceTrajectoryPartition::CheckTrajTraversed(
     const std::string& trajectory_encoding_to_check) {
-  const auto& index_history = PlanningContext::Instance()
-                                  ->open_space_info()
-                                  .partitioned_trajectories_index_history;
-  const size_t index_history_length = index_history.size();
-  if (index_history_length <= 1) {
+  const auto& open_space_status =
+      PlanningContext::Instance()->planning_status().open_space();
+  const int index_history_size =
+      open_space_status.partitioned_trajectories_index_history_size();
+
+  if (index_history_size <= 1) {
     return false;
   }
-  for (size_t i = 0; i < index_history_length - 1; ++i) {
-    if (index_history[i] == trajectory_encoding_to_check) {
+  for (int i = 0; i < index_history_size - 1; i++) {
+    const auto& index_history =
+        open_space_status.partitioned_trajectories_index_history(i);
+    if (index_history == trajectory_encoding_to_check) {
       return true;
     }
   }
@@ -356,17 +370,25 @@ bool OpenSpaceTrajectoryPartition::CheckTrajTraversed(
 
 void OpenSpaceTrajectoryPartition::UpdateTrajHistory(
     const std::string& chosen_trajectory_encoding) {
-  auto* trajectory_history = &(PlanningContext::Instance()
-                                   ->mutable_open_space_info()
-                                   ->partitioned_trajectories_index_history);
-  if (trajectory_history->empty()) {
-    trajectory_history->push_back(chosen_trajectory_encoding);
+  auto* open_space_status = PlanningContext::Instance()
+                                ->mutable_planning_status()
+                                ->mutable_open_space();
+
+  const auto& trajectory_history =
+      PlanningContext::Instance()
+          ->planning_status()
+          .open_space()
+          .partitioned_trajectories_index_history();
+  if (trajectory_history.empty()) {
+    open_space_status->add_partitioned_trajectories_index_history(
+        chosen_trajectory_encoding);
     return;
   }
-  if (trajectory_history->back() == chosen_trajectory_encoding) {
+  if (*(trajectory_history.rbegin()) == chosen_trajectory_encoding) {
     return;
   }
-  trajectory_history->push_back(chosen_trajectory_encoding);
+  open_space_status->add_partitioned_trajectories_index_history(
+      chosen_trajectory_encoding);
 }
 
 void OpenSpaceTrajectoryPartition::PartitionTrajectory(
